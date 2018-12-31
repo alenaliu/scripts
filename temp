@@ -1,0 +1,1301 @@
+"""Implement a Spectral regression CNN with spectral pooling and frequency dropout."""
+from modules.layers import spectral_pool_layer
+from modules.layers import spectral_conv_layer
+from modules.layers import default_conv_layer
+import tensorflow as tf
+import numpy as np
+from tensorflow.python import debug as tf_debug
+
+dict = {'NCHW': 'channels_first', 'NHWC': 'channels_last'}
+
+
+class Spectral_reg_net:
+    def __init__(self,
+                 interactive=True,
+                 use_spectral_parameterization=True,
+                 use_spectral_pooling=True,
+                 batch_norm=True,
+                 verbose=False,
+                 data_format='NCHW',
+                 l2_norm=0.0001,
+                 random_seed=0,
+                 gamma=0.5
+                 ):
+        gpu_config = tf.ConfigProto()
+        gpu_config.gpu_options.allow_growth = True
+        if interactive:
+            sess = tf.InteractiveSession(config=gpu_config)
+            # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+        else:
+            sess = tf.Session(config=gpu_config)
+        self.sess = sess
+        self.use_spectral_parameterization = use_spectral_parameterization
+        self.use_spectral_pooling = use_spectral_pooling
+        self.batch_norm = batch_norm
+        self.verbose = verbose
+        self.random_seed = random_seed
+        self.layers = []
+        self.parameters = []
+        self.gamma = gamma
+        self.l2_norm = l2_norm
+        self.data_format = data_format
+        # self.dict = {'channels_first': 'NCHW', 'channels_last': 'NHWC'};
+
+    def _get_sp_dim(self, n):
+        """Get filter size for current layer.
+
+        Args:
+            n: size of image in layer
+        """
+        fsize = int(self.gamma * n)
+        # minimum size is 3:
+        return max(3, fsize)
+
+    def define_network(self, patch_h, patch_w):
+        layers = self.layers
+        self.spatial_conv_weights = []
+        self.spectral_conv_weights = []
+        self.bias = []
+        with tf.name_scope("input_scope"):
+            if self.data_format == 'NCHW':
+                x_patch = tf.placeholder(tf.float32, shape=[None, 3, None, None], name="x_patch")
+                y_gt = tf.placeholder(tf.float32, shape=[None, 1, None, None, ], name="y_gt")
+            elif self.data_format == 'NHWC':
+                x_patch = tf.placeholder(tf.float32, shape=[None, None, None, 3], name="x_patch")
+                y_gt = tf.placeholder(tf.float32, shape=[None, None, None, 1], name="y_gt")
+            else:
+                print ("error data_format")
+            train_phase = tf.placeholder(shape=(), dtype=tf.bool)
+
+        with tf.name_scope("conv_1"):
+            conv_1_1 = default_conv_layer(
+                input_x=x_patch,
+                in_channel=3,
+                out_channel=64,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv1_1',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_1_1.weight)
+            self.bias.append(conv_1_1.bias)
+            layers.append(conv_1_1)
+            conv_1_2 = default_conv_layer(
+                input_x=layers[-1].output(),
+                in_channel=64,
+                out_channel=64,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv1_2',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_1_2.weight)
+            self.bias.append(conv_1_2.bias)
+            layers.append(conv_1_2)
+            if self.use_spectral_pooling:
+                in_x = layers[-1].output()
+                _, _, img_size, _ = in_x.get_shape().as_list()
+                if img_size != None:
+                    filter_size = self._get_sp_dim(img_size)
+                else:
+                    filter_size = None
+                pool_1 = spectral_pool_layer(
+                    input_x=in_x,
+                    filter_size=filter_size,
+                    freq_dropout_lower_bound=None,
+                    freq_dropout_upper_bound=None,
+                    m='pool_1',
+                    train_phase=train_phase
+                )
+            else:
+                in_x = layers[-1].output()
+                pool_1 = tf.layers.max_pooling2d(inputs=in_x,
+                                                 pool_size=2,
+                                                 strides=2,
+                                                 padding='SAME',
+                                                 data_format=dict[self.data_format],
+                                                 name='pool_1')
+            layers.append(pool_1)
+
+        with tf.name_scope("conv_2"):
+            conv_2_1 = default_conv_layer(
+                input_x=in_x,
+                in_channel=64,
+                out_channel=128,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv2_1',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_2_1.weight)
+            self.bias.append(conv_2_1.bias)
+            layers.append(conv_2_1)
+            conv_2_2 = default_conv_layer(
+                input_x=layers[-1].output(),
+                in_channel=128,
+                out_channel=128,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv2_2',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_2_2.weight)
+            self.bias.append(conv_2_2.bias)
+            layers.append(conv_2_2)
+            if self.use_spectral_pooling:
+                in_x = layers[-1].output()
+                _, _, img_size, _ = in_x.get_shape().as_list()
+                if img_size != None:
+                    filter_size = self._get_sp_dim(img_size)
+                else:
+                    filter_size = None
+                pool_2 = spectral_pool_layer(
+                    input_x=in_x,
+                    filter_size=filter_size,
+                    freq_dropout_lower_bound=None,
+                    freq_dropout_upper_bound=None,
+                    m='pool_2',
+                    train_phase=train_phase
+                )
+            else:
+                in_x = layers[-1].output()
+                pool_2 = tf.layers.max_pooling2d(inputs=in_x,
+                                                 pool_size=2,
+                                                 strides=2,
+                                                 padding='SAME',
+                                                 data_format=dict[self.data_format],
+                                                 name='pool_2')
+            layers.append(pool_2)
+
+        with tf.name_scope("conv_3"):
+            conv_3_1 = default_conv_layer(
+                input_x=in_x,
+                in_channel=128,
+                out_channel=256,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv3_1',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_3_1.weight)
+            self.bias.append(conv_3_1.bias)
+            layers.append(conv_3_1)
+            conv_3_2 = default_conv_layer(
+                input_x=layers[-1].output(),
+                in_channel=256,
+                out_channel=256,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv3_2',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_3_2.weight)
+            self.bias.append(conv_3_2.bias)
+            layers.append(conv_3_2)
+            conv_3_3 = default_conv_layer(
+                input_x=layers[-1].output(),
+                in_channel=256,
+                out_channel=256,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv3_3',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_3_3.weight)
+            self.bias.append(conv_3_3.bias)
+            layers.append(conv_3_3)
+            if self.use_spectral_pooling:
+                in_x = layers[-1].output()
+                _, _, img_size, _ = in_x.get_shape().as_list()
+                if img_size != None:
+                    filter_size = self._get_sp_dim(img_size)
+                else:
+                    filter_size = None
+                pool_3 = spectral_pool_layer(
+                    input_x=in_x,
+                    filter_size=filter_size,
+                    freq_dropout_lower_bound=None,
+                    freq_dropout_upper_bound=None,
+                    m='pool_3',
+                    train_phase=train_phase
+                )
+            else:
+                in_x = layers[-1].output()
+                pool_3 = tf.layers.max_pooling2d(inputs=in_x,
+                                                 pool_size=2,
+                                                 strides=2,
+                                                 padding='SAME',
+                                                 data_format=dict[self.data_format],
+                                                 name='pool_3')
+            layers.append(pool_3)
+
+        with tf.name_scope("conv_4"):
+            conv_4_1 = default_conv_layer(
+                input_x=in_x,
+                in_channel=256,
+                out_channel=512,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv4_1',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_4_1.weight)
+            self.bias.append(conv_4_1.bias)
+            layers.append(conv_4_1)
+            conv_4_2 = default_conv_layer(
+                input_x=layers[-1].output(),
+                in_channel=512,
+                out_channel=512,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv4_2',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_4_2.weight)
+            self.bias.append(conv_4_2.bias)
+            layers.append(conv_4_2)
+            conv_4_3 = default_conv_layer(
+                input_x=layers[-1].output(),
+                in_channel=512,
+                out_channel=512,
+                kernel_size=3,
+                random_seed=self.random_seed,
+                m='conv4_3',
+                data_format=self.data_format,
+                batch_norm=self.batch_norm,
+                train_phase=train_phase
+            )
+            self.spatial_conv_weights.append(conv_4_3.weight)
+            self.bias.append(conv_4_3.bias)
+            layers.append(conv_4_3)
+
+        with tf.name_scope("conv_5"):
+            if self.use_spectral_parameterization:
+                conv_5_1 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_1.weight)
+                self.spectral_conv_weights.append(conv_5_1.spectral_weight)
+                self.bias.append(conv_5_1.bias)
+            else:
+                conv_5_1 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_1.weight)
+                self.bias.append(conv_5_1.bias)
+            layers.append(conv_5_1)
+            if self.use_spectral_parameterization:
+                conv_5_2 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_2.weight)
+                self.spectral_conv_weights.append(conv_5_2.spectral_weight)
+                self.bias.append(conv_5_2.bias)
+            else:
+                conv_5_2 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_2.weight)
+                self.bias.append(conv_5_2.bias)
+            layers.append(conv_5_2)
+            if self.use_spectral_parameterization:
+                conv_5_3 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_3',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_3.weight)
+                self.spectral_conv_weights.append(conv_5_3.spectral_weight)
+                self.bias.append(conv_5_3.bias)
+            else:
+                conv_5_3 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_3',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_3.weight)
+                self.bias.append(conv_5_3.bias)
+            layers.append(conv_5_3)
+            if self.use_spectral_parameterization:
+                conv_5_4 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=256,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_4',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_4.weight)
+                self.spectral_conv_weights.append(conv_5_4.spectral_weight)
+                self.bias.append(conv_5_4.bias)
+            else:
+                conv_5_4 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=256,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_4',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_4.weight)
+                self.bias.append(conv_5_4.bias)
+            layers.append(conv_5_4)
+            if self.use_spectral_parameterization:
+                conv_5_5 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=256,
+                    out_channel=128,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_5',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_5.weight)
+                self.spectral_conv_weights.append(conv_5_5.spectral_weight)
+                self.bias.append(conv_5_5.bias)
+            else:
+                conv_5_5 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=256,
+                    out_channel=128,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_5',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_5.weight)
+                self.bias.append(conv_5_5.bias)
+            layers.append(conv_5_5)
+            if self.use_spectral_parameterization:
+                conv_5_6 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=128,
+                    out_channel=64,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    # activation=None,
+                    # use_bias=False,
+                    m='conv5_6',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_6.weight)
+                self.spectral_conv_weights.append(conv_5_6.spectral_weight)
+                self.bias.append(conv_5_6.bias)
+            else:
+                conv_5_6 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=128,
+                    out_channel=64,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    # activation=None,
+                    # use_bias=False,
+                    m='conv5_6',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_6.weight)
+                self.bias.append(conv_5_6.bias)
+            y_mul_pred = tf.identity(conv_5_6.output(), name="y_mul_pred")
+            layers.append(conv_5_6)
+        with tf.name_scope("prediction"):
+            if self.use_spectral_parameterization:
+                y_pred = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=64,
+                    out_channel=1,
+                    kernel_size=5,
+                    random_seed=self.random_seed,
+                    activation=None,
+                    # use_bias=False,
+                    m='conv_pred',
+                    data_format=self.data_format,  # delete bias & batch_norm
+                    batch_norm=False,
+                    train_phase=train_phase
+                )
+            else:
+                y_pred = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=64,
+                    out_channel=1,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    activation=None,
+                    # use_bias=False,
+                    m='conv_pred',
+                    data_format=self.data_format,  # delete bias & batch_norm
+                    batch_norm=False,
+                    train_phase=train_phase
+                )
+            y_pred = tf.identity(y_pred.output(), name="y_pred")
+
+        with tf.name_scope("pixel_wise_loss"):
+            # l2_loss = tf.reduce_sum([tf.nn.l2_loss(w)
+            #                         for w in self.spatial_conv_weights])
+            # y_diff = tf.subtract(tf.real(tf.fft2d(tf.cast(y_pred, tf.complex64))), tf.real(tf.fft2d(tf.cast(y_gt, tf.complex64))))
+            y_diff = tf.subtract(y_pred, y_gt)
+            y_diff_square = tf.square(y_diff)
+
+            if self.data_format == 'NCHW':
+                # y_mul_diff = tf.subtract(y_mul_pred, tf.tile(y_gt, [1, 64, 1, 1]))
+                # y_mul_diff_square = tf.square(y_mul_diff)
+                # y_mul_feat_map_diff = tf.reduce_sum(y_mul_diff_square, axis=[2,3])
+                y_feat_map_diff = tf.reduce_sum(y_diff_square, axis=[2, 3])
+            elif self.data_format == 'NHWC':
+                # y_mul_diff = tf.subtract(y_mul_pred, tf.tile(y_gt, [1, 1, 1, 64]))
+                # y_mul_diff_square = tf.square(y_mul_diff)
+                # y_mul_feat_map_diff = tf.reduce_sum(y_mul_diff_square, axis=[1,2])
+                y_feat_map_diff = tf.reduce_sum(y_diff_square, axis=[1, 2])
+            else:
+                print ("error data_format")
+
+            mse_loss = tf.reduce_mean(y_feat_map_diff, name='mse_loss')
+            # mul_mse_loss = tf.reduce_mean(y_mul_feat_map_diff, name='mul_mse_loss')
+            # loss = tf.add(mse_loss, mul_mse_loss, name='loss')
+            # loss = tf.add(mse_loss, self.l2_norm * l2_loss, name='loss')
+
+        return self.sess, train_phase, x_patch, y_gt, y_pred, mse_loss
+
+    def load_weights(self, weight_file, sess):
+        weights = np.load(weight_file, encoding='latin1').item()
+        keys = sorted(weights.keys())
+        for i, k in enumerate(keys):
+            if i not in [10, 11, 12, 13, 14, 15]:
+                # w_shape = weights[k][0].shape
+                # weights_copy = tf.placeholder(tf.float32, w_shape, name="weights_copy")
+
+                sess.run(tf.assign(self.spatial_conv_weights[i][0], weights[k][0]))
+                sess.run(tf.assign(self.bias[i], weights[k][1]))
+                '''kernel_real=self.spectral_conv_weights[i][0].assign(
+                         tf.real(tf.transpose(tf.fft2d(tf.transpose(tf.cast(weights_copy,tf.complex64),
+                                                       [2, 3, 0, 1])),[2,3,0,1]))
+                )
+
+                kernel_imag =self.spectral_conv_weights[i][0].assign(
+                         tf.imag(tf.transpose(tf.fft2d(tf.transpose(tf.cast(weights_copy,tf.complex64),
+                                                       [2, 3, 0, 1])),[2,3,0,1]))
+                )
+
+                sess.run([kernel_real,kernel_imag],feed_dict={weights_copy:weights[k][0]})'''
+
+        print("---------done: copy weithts from pre-trained vgg-16 ---------------")
+
+
+"""Implement a Spectral regression CNN with spectral pooling and frequency dropout."""
+from modules.layers import spectral_pool_layer
+from modules.layers import spectral_conv_layer
+from modules.layers import default_conv_layer
+import tensorflow as tf
+import numpy as np
+from tensorflow.python import debug as tf_debug
+
+dict = {'NCHW': 'channels_first', 'NHWC': 'channels_last'}
+
+class Spectral_reg_net:
+    def __init__(self,
+                 interactive=True,
+                 use_spectral_parameterization=True,
+                 use_spectral_pooling=True,
+                 batch_norm = True,
+                 verbose=False,
+                 data_format='NCHW',
+                 l2_norm=0.0001,
+                 random_seed=0,
+                 gamma=0.5
+                 ):
+        gpu_config = tf.ConfigProto()
+        gpu_config.gpu_options.allow_growth = True
+        if interactive:
+            sess = tf.InteractiveSession(config=gpu_config)
+            #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+        else:
+            sess = tf.Session(config=gpu_config)
+        self.sess = sess
+        self.use_spectral_parameterization = use_spectral_parameterization
+        self.use_spectral_pooling = use_spectral_pooling
+        self.batch_norm = batch_norm
+        self.verbose = verbose
+        self.random_seed = random_seed
+        self.layers = []
+        self.parameters = []
+        self.gamma = gamma
+        self.l2_norm = l2_norm
+        self.data_format = data_format
+        #self.dict = {'channels_first': 'NCHW', 'channels_last': 'NHWC'};
+    def _get_sp_dim(self, n):
+        """Get filter size for current layer.
+
+        Args:
+            n: size of image in layer
+        """
+        fsize = int(self.gamma * n)
+        # minimum size is 3:
+        return max(3, fsize)
+
+    def define_network(self, patch_h, patch_w):
+        layers = self.layers
+        self.spatial_conv_weights = []
+        self.spectral_conv_weights = []
+        self.bias = []
+        with tf.name_scope("input_scope"):
+            if self.data_format == 'NCHW':
+                x_patch = tf.placeholder(tf.float32, shape=[None, 3, None, None], name="x_patch")
+                y_gt = tf.placeholder(tf.float32, shape=[None, 1, None, None,], name="y_gt")
+            elif self.data_format == 'NHWC':
+                x_patch = tf.placeholder(tf.float32, shape=[None, None, None,3], name="x_patch")
+                y_gt = tf.placeholder(tf.float32, shape=[None, None, None, 1], name="y_gt")
+            else:
+                print ("error data_format")
+            train_phase = tf.placeholder(shape=(), dtype=tf.bool)
+
+        with tf.name_scope("conv_1"):
+            if self.use_spectral_parameterization:
+                conv_1_1 = spectral_conv_layer(
+                    input_x=x_patch,
+                    in_channel=3,
+                    out_channel=64,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv1_1',
+                    data_format=self.data_format,
+                    batch_norm = self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_1_1.weight)
+                self.spectral_conv_weights.append(conv_1_1.spectral_weight)
+                self.bias.append(conv_1_1.bias)
+            else:
+                conv_1_1 = default_conv_layer(
+                    input_x=x_patch,
+                    in_channel=3,
+                    out_channel=64,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv1_1',
+                    data_format=self.data_format,
+                    batch_norm = self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_1_1.weight)
+                self.bias.append(conv_1_1.bias)
+            layers.append(conv_1_1)
+            if self.use_spectral_parameterization:
+                conv_1_2 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=64,
+                    out_channel=64,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv1_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_1_2.weight)
+                self.spectral_conv_weights.append(conv_1_2.spectral_weight)
+                self.bias.append(conv_1_2.bias)
+            else:
+                conv_1_2 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=64,
+                    out_channel=64,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv1_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_1_2.weight)
+                self.bias.append(conv_1_2.bias)
+            layers.append(conv_1_2)
+            if self.use_spectral_pooling:
+                in_x = layers[-1].output()
+                _, _, img_size, _ = in_x.get_shape().as_list()
+                if img_size != None:
+                    filter_size = self._get_sp_dim(img_size)
+                else:
+                    filter_size = None
+                pool_1 = spectral_pool_layer(
+                    input_x=in_x,
+                    filter_size=filter_size,
+                    freq_dropout_lower_bound=None,
+                    freq_dropout_upper_bound=None,
+                    m='pool_1',
+                    train_phase=train_phase
+                )
+            else:
+                in_x = layers[-1].output()
+                pool_1 = tf.layers.max_pooling2d(inputs=in_x,
+                                                 pool_size=2,
+                                                 strides=2,
+                                                 padding='SAME',
+                                                 data_format=dict[self.data_format],
+                                                 name='pool_1')
+            layers.append(pool_1)
+
+        with tf.name_scope("conv_2"):
+            if self.use_spectral_parameterization:
+                in_x = layers[-1].output()
+                conv_2_1 = spectral_conv_layer(
+                    input_x=in_x,
+                    in_channel=64,
+                    out_channel=128,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv2_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_2_1.weight)
+                self.spectral_conv_weights.append(conv_2_1.spectral_weight)
+                self.bias.append(conv_2_1.bias)
+            else:
+                conv_2_1 = default_conv_layer(
+                    input_x=in_x,
+                    in_channel=64,
+                    out_channel=128,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv2_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_2_1.weight)
+                self.bias.append(conv_2_1.bias)
+            layers.append(conv_2_1)
+            if self.use_spectral_parameterization:
+                conv_2_2 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=128,
+                    out_channel=128,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv2_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_2_2.weight)
+                self.spectral_conv_weights.append(conv_2_2.spectral_weight)
+                self.bias.append(conv_2_2.bias)
+            else:
+                conv_2_2 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=128,
+                    out_channel=128,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv2_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_2_2.weight)
+                self.bias.append(conv_2_2.bias)
+            layers.append(conv_2_2)
+            if self.use_spectral_pooling:
+                in_x = layers[-1].output()
+                _, _, img_size, _ = in_x.get_shape().as_list()
+                if img_size != None:
+                    filter_size = self._get_sp_dim(img_size)
+                else:
+                    filter_size = None
+                pool_2 = spectral_pool_layer(
+                    input_x=in_x,
+                    filter_size=filter_size,
+                    freq_dropout_lower_bound=None,
+                    freq_dropout_upper_bound=None,
+                    m='pool_2',
+                    train_phase=train_phase
+                )
+            else:
+                in_x = layers[-1].output()
+                pool_2 = tf.layers.max_pooling2d(inputs=in_x,
+                                                 pool_size=2,
+                                                 strides=2,
+                                                 padding='SAME',
+                                                 data_format=dict[self.data_format],
+                                                 name='pool_2')
+            layers.append(pool_2)
+
+        with tf.name_scope("conv_3"):
+            if self.use_spectral_parameterization:
+                in_x = layers[-1].output()
+                conv_3_1 = spectral_conv_layer(
+                    input_x=in_x,
+                    in_channel=128,
+                    out_channel=256,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv3_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_3_1.weight)
+                self.spectral_conv_weights.append(conv_3_1.spectral_weight)
+                self.bias.append(conv_3_1.bias)
+            else:
+                conv_3_1 = default_conv_layer(
+                    input_x=in_x,
+                    in_channel=128,
+                    out_channel=256,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv3_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_3_1.weight)
+                self.bias.append(conv_3_1.bias)
+            layers.append(conv_3_1)
+            if self.use_spectral_parameterization:
+                conv_3_2 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=256,
+                    out_channel=256,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv3_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_3_2.weight)
+                self.spectral_conv_weights.append(conv_3_2.spectral_weight)
+                self.bias.append(conv_3_2.bias)
+            else:
+                conv_3_2 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=256,
+                    out_channel=256,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv3_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_3_2.weight)
+                self.bias.append(conv_3_2.bias)
+            layers.append(conv_3_2)
+            if self.use_spectral_parameterization:
+                conv_3_3 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=256,
+                    out_channel=256,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv3_3',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_3_3.weight)
+                self.spectral_conv_weights.append(conv_3_3.spectral_weight)
+                self.bias.append(conv_3_3.bias)
+            else:
+                conv_3_3 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=256,
+                    out_channel=256,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv3_3',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_3_3.weight)
+                self.bias.append(conv_3_3.bias)
+            layers.append(conv_3_3)
+            if self.use_spectral_pooling:
+                in_x = layers[-1].output()
+                _, _, img_size, _ = in_x.get_shape().as_list()
+                if img_size != None:
+                    filter_size = self._get_sp_dim(img_size)
+                else:
+                    filter_size = None
+                pool_3 = spectral_pool_layer(
+                    input_x=in_x,
+                    filter_size=filter_size,
+                    freq_dropout_lower_bound=None,
+                    freq_dropout_upper_bound=None,
+                    m='pool_3',
+                    train_phase=train_phase
+                )
+            else:
+                in_x = layers[-1].output()
+                pool_3 = tf.layers.max_pooling2d(inputs=in_x,
+                                                 pool_size=2,
+                                                 strides=2,
+                                                 padding='SAME',
+                                                 data_format=dict[self.data_format],
+                                                 name='pool_3')
+            layers.append(pool_3)
+
+        with tf.name_scope("conv_4"):
+            if self.use_spectral_parameterization:
+                in_x = layers[-1].output()
+                conv_4_1 = spectral_conv_layer(
+                    input_x=in_x,
+                    in_channel=256,
+                    out_channel=512,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv4_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_4_1.weight)
+                self.spectral_conv_weights.append(conv_4_1.spectral_weight)
+                self.bias.append(conv_4_1.bias)
+            else:
+                conv_4_1 = default_conv_layer(
+                    input_x=in_x,
+                    in_channel=256,
+                    out_channel=512,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv4_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_4_1.weight)
+                self.bias.append(conv_4_1.bias)
+            layers.append(conv_4_1)
+            if self.use_spectral_parameterization:
+                conv_4_2 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv4_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_4_2.weight)
+                self.spectral_conv_weights.append(conv_4_2.spectral_weight)
+                self.bias.append(conv_4_2.bias)
+            else:
+                conv_4_2 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv4_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_4_2.weight)
+                self.bias.append(conv_4_2.bias)
+            layers.append(conv_4_2)
+            if self.use_spectral_parameterization:
+                conv_4_3 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv4_3',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_4_3.weight)
+                self.spectral_conv_weights.append(conv_4_3.spectral_weight)
+                self.bias.append(conv_4_3.bias)
+            else:
+                conv_4_3 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    m='conv4_3',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_4_3.weight)
+                self.bias.append(conv_4_3.bias)
+            layers.append(conv_4_3)
+
+        with tf.name_scope("conv_5"):
+            if self.use_spectral_parameterization:
+                conv_5_1 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_1.weight)
+                self.spectral_conv_weights.append(conv_5_1.spectral_weight)
+                self.bias.append(conv_5_1.bias)
+            else:
+                conv_5_1 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_1',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_1.weight)
+                self.bias.append(conv_5_1.bias)
+            layers.append(conv_5_1)
+            if self.use_spectral_parameterization:
+                conv_5_2 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_2.weight)
+                self.spectral_conv_weights.append(conv_5_2.spectral_weight)
+                self.bias.append(conv_5_2.bias)
+            else:
+                conv_5_2 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_2',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_2.weight)
+                self.bias.append(conv_5_2.bias)
+            layers.append(conv_5_2)
+            if self.use_spectral_parameterization:
+                conv_5_3 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_3',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_3.weight)
+                self.spectral_conv_weights.append(conv_5_3.spectral_weight)
+                self.bias.append(conv_5_3.bias)
+            else:
+                conv_5_3 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=512,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_3',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_3.weight)
+                self.bias.append(conv_5_3.bias)
+            layers.append(conv_5_3)
+            if self.use_spectral_parameterization:
+                conv_5_4 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=256,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_4',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_4.weight)
+                self.spectral_conv_weights.append(conv_5_4.spectral_weight)
+                self.bias.append(conv_5_4.bias)
+            else:
+                conv_5_4 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=512,
+                    out_channel=256,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_4',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_4.weight)
+                self.bias.append(conv_5_4.bias)
+            layers.append(conv_5_4)
+            if self.use_spectral_parameterization:
+                conv_5_5 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=256,
+                    out_channel=128,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_5',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_5.weight)
+                self.spectral_conv_weights.append(conv_5_5.spectral_weight)
+                self.bias.append(conv_5_5.bias)
+            else:
+                conv_5_5 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=256,
+                    out_channel=128,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    m='conv5_5',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_5.weight)
+                self.bias.append(conv_5_5.bias)
+            layers.append(conv_5_5)
+            if self.use_spectral_parameterization:
+                conv_5_6 = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=128,
+                    out_channel=64,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    #activation=None,
+                    #use_bias=False,
+                    m='conv5_6',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_6.weight)
+                self.spectral_conv_weights.append(conv_5_6.spectral_weight)
+                self.bias.append(conv_5_6.bias)
+            else:
+                conv_5_6 = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=128,
+                    out_channel=64,
+                    kernel_size=3,
+                    dilations=[1, 1, 2, 2],
+                    random_seed=self.random_seed,
+                    #activation=None,
+                    #use_bias=False,
+                    m='conv5_6',
+                    data_format=self.data_format,
+                    batch_norm=self.batch_norm,
+                    train_phase=train_phase
+                )
+                self.spatial_conv_weights.append(conv_5_6.weight)
+                self.bias.append(conv_5_6.bias)
+            y_mul_pred = tf.identity(conv_5_6.output(), name="y_mul_pred")
+            layers.append(conv_5_6)
+        with tf.name_scope("prediction"):
+            if self.use_spectral_parameterization:
+                 y_pred = spectral_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=64,
+                    out_channel=1,
+                    kernel_size=3                   ,
+                    random_seed=self.random_seed,
+                    activation=None,
+                    #use_bias=False,
+                    m='conv_pred',
+                    data_format=self.data_format,#delete bias & batch_norm
+                    batch_norm=False,
+                    train_phase=train_phase
+                 )
+            else:
+                y_pred = default_conv_layer(
+                    input_x=layers[-1].output(),
+                    in_channel=64,
+                    out_channel=1,
+                    kernel_size=3,
+                    random_seed=self.random_seed,
+                    activation=None,
+                    # use_bias=False,
+                    m='conv_pred',
+                    data_format=self.data_format,  # delete bias & batch_norm
+                    batch_norm=False,
+                    train_phase=train_phase
+                )
+            y_pred = tf.identity(y_pred.output(), name="y_pred")
+
+        with tf.name_scope("pixel_wise_loss"):
+            #l2_loss = tf.reduce_sum([tf.nn.l2_loss(w)
+            #                         for w in self.spatial_conv_weights])
+            #y_diff = tf.subtract(tf.real(tf.fft2d(tf.cast(y_pred, tf.complex64))), tf.real(tf.fft2d(tf.cast(y_gt, tf.complex64))))
+            y_diff = tf.subtract(y_pred,y_gt)
+            y_diff_square = tf.square(y_diff)
+
+            if self.data_format == 'NCHW' :
+                #y_mul_diff = tf.subtract(y_mul_pred, tf.tile(y_gt, [1, 64, 1, 1]))
+                #y_mul_diff_square = tf.square(y_mul_diff)
+                #y_mul_feat_map_diff = tf.reduce_sum(y_mul_diff_square, axis=[2,3])
+                y_feat_map_diff = tf.reduce_sum(y_diff_square, axis=[2,3])
+            elif self.data_format == 'NHWC':
+                #y_mul_diff = tf.subtract(y_mul_pred, tf.tile(y_gt, [1, 1, 1, 64]))
+                #y_mul_diff_square = tf.square(y_mul_diff)
+                #y_mul_feat_map_diff = tf.reduce_sum(y_mul_diff_square, axis=[1,2])
+                y_feat_map_diff = tf.reduce_sum(y_diff_square, axis=[1,2])
+            else:
+                print ("error data_format")
+
+            mse_loss = tf.reduce_mean(y_feat_map_diff, name='mse_loss')
+            #mul_mse_loss = tf.reduce_mean(y_mul_feat_map_diff, name='mul_mse_loss')
+            #loss = tf.add(mse_loss, mul_mse_loss, name='loss')
+            #loss = tf.add(mse_loss, self.l2_norm * l2_loss, name='loss')
+
+        return self.sess, train_phase, x_patch, y_gt, y_pred, mse_loss
+
+    def load_weights(self, weight_file , sess):
+        weights = np.load(weight_file,encoding='latin1').item()
+        keys = sorted(weights.keys())
+        for i, k in enumerate(keys):
+            if i not in [10,11,12,13,14,15]:
+                #w_shape = weights[k][0].shape
+                #weights_copy = tf.placeholder(tf.float32, w_shape, name="weights_copy")
+
+                sess.run(tf.assign(self.spatial_conv_weights[i][0],weights[k][0]))
+                sess.run(tf.assign(self.bias[i], weights[k][1]))
+                '''kernel_real=self.spectral_conv_weights[i][0].assign(
+                         tf.real(tf.transpose(tf.fft2d(tf.transpose(tf.cast(weights_copy,tf.complex64),
+                                                       [2, 3, 0, 1])),[2,3,0,1]))
+                )
+
+                kernel_imag =self.spectral_conv_weights[i][0].assign(
+                         tf.imag(tf.transpose(tf.fft2d(tf.transpose(tf.cast(weights_copy,tf.complex64),
+                                                       [2, 3, 0, 1])),[2,3,0,1]))
+                )
+
+                sess.run([kernel_real,kernel_imag],feed_dict={weights_copy:weights[k][0]})'''
+
+        print("---------done: copy weithts from pre-trained vgg-16 ---------------")
+
+
